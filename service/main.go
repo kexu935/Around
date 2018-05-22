@@ -74,6 +74,11 @@ func main() {
 func handlerAddProduct(w http.ResponseWriter, r *http.Request) {
 	// Parse from body of request to get a json object.
 	fmt.Println("Received one post request")
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization")
+
 	decoder := json.NewDecoder(r.Body)
 	var p Product
 	if err := decoder.Decode(&p); err != nil {
