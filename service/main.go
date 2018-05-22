@@ -9,6 +9,9 @@ import (
 	"reflect"
 	"gopkg.in/olivere/elastic.v3"
 	"github.com/pborman/uuid"
+	"github.com/gorilla/mux"
+	"github.com/auth0/go-jwt-middleware"
+	"github.com/dgrijalva/jwt-go"
 )
 
 const (
@@ -16,6 +19,10 @@ const (
 	INDEX = "around"
 	TYPE = "product"
 	ES_URL = "http://35.232.51.146:9200"
+)
+
+var (
+	mySigningKey = []byte("secret");
 )
 
 type Location struct {
@@ -64,30 +71,62 @@ func main() {
 			panic(err)
 		}
 	}
+	fmt.Println("Started service successfully")
+	// Here we are instantiating the gorilla/mux router
+	r := mux.NewRouter()
 
-	fmt.Println("started-service")
-	http.HandleFunc("/addproduct", handlerAddProduct)
-	http.HandleFunc("/search", handlerSearch)
+	var jwtMiddleware = jwtmiddleware.New(jwtmiddleware.Options{
+		ValidationKeyGetter: func(token *jwt.Token) (interface{}, error) {
+			return mySigningKey, nil
+		},
+		SigningMethod: jwt.SigningMethodHS256,
+	})
+
+	r.Handle("/addproduct", jwtMiddleware.Handler(http.HandlerFunc(handlerAddProduct)))
+	r.Handle("/search", jwtMiddleware.Handler(http.HandlerFunc(handlerSearch)))
+	r.Handle("/login", http.HandlerFunc(loginHandler))
+	r.Handle("/signup", http.HandlerFunc(signupHandler))
+
+	http.Handle("/", r)
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
 func handlerAddProduct(w http.ResponseWriter, r *http.Request) {
-	// Parse from body of request to get a json object.
-	fmt.Println("Received one post request")
-
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization")
 
-	decoder := json.NewDecoder(r.Body)
-	var p Product
-	if err := decoder.Decode(&p); err != nil {
-		panic(err)
+	if r.Method != "POST" {
 		return
 	}
+
+	user := r.Context().Value("user")
+	if user == nil {
+		m := fmt.Sprintf("Unable to find user in context")
+		fmt.Println(m)
+		http.Error(w, m, http.StatusBadRequest)
+		return
+	}
+	claims := user.(*jwt.Token).Claims
+	username := claims.(jwt.MapClaims)["username"]
+
+	// Parse from form data.
+	fmt.Printf("Received one post request %s\n", r.FormValue("message"))
+	lat, _ := strconv.ParseFloat(r.FormValue("lat"), 64)
+	lon, _ := strconv.ParseFloat(r.FormValue("lon"), 64)
+	p := &Product{
+		User:    username.(string),
+		Description: r.FormValue("description"),
+		Category: r.FormValue("category"),
+		Location: Location{
+			Lat: lat,
+			Lon: lon,
+		},
+	}
+
 	id := uuid.New()
 	// Save to ES.
-	saveToES(&p, id)
+	go saveToES(p, id)
 }
 
 // Save a post to ElasticSearch
@@ -118,6 +157,14 @@ func saveToES(p *Product, id string) {
 func handlerSearch(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Received one request for search")
 
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization")
+
+	if r.Method != "GET" {
+		return
+	}
+
 	lat, _ := strconv.ParseFloat(r.URL.Query().Get("lat"), 64)
 	lon, _ := strconv.ParseFloat(r.URL.Query().Get("lon"), 64)
 	// range is optional
@@ -131,7 +178,8 @@ func handlerSearch(w http.ResponseWriter, r *http.Request) {
 	// Create a client
 	client, err := elastic.NewClient(elastic.SetURL(ES_URL), elastic.SetSniff(false))
 	if err != nil {
-		panic(err)
+		http.Error(w, "ES is not setup", http.StatusInternalServerError)
+		fmt.Printf("ES is not setup %v\n", err)
 		return
 	}
 
@@ -164,20 +212,18 @@ func handlerSearch(w http.ResponseWriter, r *http.Request) {
 	var ps []Product
 	for _, item := range searchResult.Each(reflect.TypeOf(typ)) { // instance of
 		p := item.(Product) // p = (Post) item
-		fmt.Printf("Post by %s: %s %s at lat %v and lon %v\n", p.User, p.Description, p.Category, p.Location.Lat, p.Location.Lon)
+		fmt.Printf("Post by %s: %s, %s at lat %v and lon %v\n", p.User, p.Description, p.Category, p.Location.Lat, p.Location.Lon)
 		// TODO(student homework): Perform filtering based on keywords such as web spam etc.
 		ps = append(ps, p)
 
 	}
 	js, err := json.Marshal(ps)
 	if err != nil {
-		panic(err)
+		m := fmt.Sprintf("Failed to parse post object %v", err)
+		fmt.Println(m)
+		http.Error(w, m, http.StatusInternalServerError)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Write(js)
 }
-
-
